@@ -1,16 +1,23 @@
 package rocks.twr.core.app_out;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.debezium.relational.HistorizedRelationalDatabaseConnectorConfig;
 import org.apache.kafka.connect.runtime.distributed.DistributedConfig;
 import org.junit.jupiter.api.Test;
 import rocks.twr.api.out.DatabaseType;
+import rocks.twr.core.SimpleJacksonConfig;
 
 import java.io.IOException;
 import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Properties;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.fail;
 
 public class DebeziumEngineWrapperIT extends AbstractContainerBaseTest {
 
@@ -28,14 +35,14 @@ public class DebeziumEngineWrapperIT extends AbstractContainerBaseTest {
         props.setProperty("database.server.id", "85744");
         props.setProperty("database.include.list", "test");
         props.setProperty("table.include.list", "tasks");
-        props.setProperty("bootstrap.servers", redpanda.getBootstrapServers());
+        props.setProperty("bootstrap.servers", "localhost:" + redpanda.getMappedPort(9092));
         props.setProperty(DistributedConfig.OFFSET_STORAGE_TOPIC_CONFIG, "debezium-offset-storage");
         props.setProperty(DistributedConfig.OFFSET_STORAGE_PARTITIONS_CONFIG, "25");
         props.setProperty(DistributedConfig.OFFSET_STORAGE_REPLICATION_FACTOR_CONFIG, "1");
 
         props.setProperty(DistributedConfig.OFFSET_STORAGE_REPLICATION_FACTOR_CONFIG, "1");
-        props.setProperty(HistorizedRelationalDatabaseConnectorConfig.SCHEMA_HISTORY.name() + ".kafka.topic", "schema.history.internal");
-        props.setProperty(HistorizedRelationalDatabaseConnectorConfig.SCHEMA_HISTORY.name() + ".kafka.bootstrap.servers", redpanda.getBootstrapServers());
+        props.setProperty(HistorizedRelationalDatabaseConnectorConfig.SCHEMA_HISTORY.name() + ".kafka.topic", "debezium-schema-history-internal");
+        props.setProperty(HistorizedRelationalDatabaseConnectorConfig.SCHEMA_HISTORY.name() + ".kafka.bootstrap.servers", "localhost:" + redpanda.getMappedPort(9092));
 
         /* TODO
             "schema.history.internal.consumer.security.protocol": "SASL_PLAINTEXT",
@@ -50,16 +57,19 @@ public class DebeziumEngineWrapperIT extends AbstractContainerBaseTest {
 
         JdbcService jdbcService = new JdbcService("com.mysql.cj.jdbc.Driver", mysql.getJdbcUrl(), mysql.getUsername(), mysql.getPassword());
 
+        List<String> collectedRecords = new ArrayList<>();
         CountDownLatch latch = new CountDownLatch(1);
-        try(DebeziumEngineWrapper wrapper = new DebeziumEngineWrapper(DatabaseType.Mysql, "test", props, changeEvent -> {
-            System.out.println("HERE");
+        ObjectMapper om = SimpleJacksonConfig.getOM();
+        try(DebeziumEngineWrapper wrapper = new DebeziumEngineWrapper(DatabaseType.Mysql, "test", props, om, changeEvent -> {
+            System.out.println("HERE: " + changeEvent);
+            collectedRecords.add(new String(changeEvent.value()));
             latch.countDown();
         })) {
             Executors.newFixedThreadPool(1).execute(wrapper);
 
             wrapper.awaitUntilRunning(60, TimeUnit.SECONDS);
             System.out.println("CREATING TASKS TABLE");
-            jdbcService.executeUpdate("create table tasks(id varchar(255), aggregate varchar(255) )");
+            jdbcService.executeUpdate("create table if not exists tasks(id varchar(255), aggregate varchar(255) )");
             System.out.println("INSERTING TASK");
             jdbcService.executeUpdate("insert into tasks(id, aggregate) values ('" + System.currentTimeMillis() + "', '" + """
                     {
@@ -68,6 +78,9 @@ public class DebeziumEngineWrapperIT extends AbstractContainerBaseTest {
                     """ + "')");
 
             latch.await();
+
+            assertEquals(1, collectedRecords.size());
+            fail("TODO more assertions");
         }
     }
 }

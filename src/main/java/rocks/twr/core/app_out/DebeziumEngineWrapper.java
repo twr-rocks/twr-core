@@ -1,5 +1,6 @@
 package rocks.twr.core.app_out;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.debezium.embedded.EmbeddedEngine;
 import io.debezium.engine.ChangeEvent;
 import io.debezium.engine.DebeziumEngine;
@@ -8,6 +9,7 @@ import io.debezium.relational.HistorizedRelationalDatabaseConnectorConfig;
 import io.debezium.storage.kafka.history.KafkaSchemaHistory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import rocks.twr.api.DebeziumRawMapper;
 import rocks.twr.api.out.DatabaseType;
 
 import java.io.IOException;
@@ -16,15 +18,16 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
-public class DebeziumEngineWrapper implements Runnable, AutoCloseable, DebeziumEngine.ConnectorCallback {
+public class DebeziumEngineWrapper implements Runnable, AutoCloseable, DebeziumEngine.ConnectorCallback, DebeziumEngine.CompletionCallback {
 
     private final Logger log = LoggerFactory.getLogger(this.getClass());
-
     private final DebeziumEngine<ChangeEvent<String, String>> engine;
     private CountDownLatch startupLatch;
+    private DebeziumRawMapper mapper;
 
     // TODO rename prefix to be more useful
-    public DebeziumEngineWrapper(DatabaseType dbType, String prefix, Properties props, Consumer<ChangeEvent<String, String>> changeHandler) {
+    public DebeziumEngineWrapper(DatabaseType dbType, String prefix, Properties props, ObjectMapper om,
+                                 Consumer<DebeziumRawMapper.MappedEvent> changeHandler) {
 
         startupLatch = new CountDownLatch(1);
 
@@ -37,26 +40,24 @@ public class DebeziumEngineWrapper implements Runnable, AutoCloseable, DebeziumE
             throw new IllegalArgumentException("unexpected database type " + dbType + " - please contact https://twr.rocks");
         }
 
-        // TODO doesnt it need topic names?
-        // TODO props.setProperty("config.storage", org.apache.kafka.connect.storage.KafkaConfigBackingStore.class.getName());
-        // TODO props.setProperty("status.storage", org.apache.kafka.connect.storage.KafkaStatusBackingStore.class.getName());
+        if(!props.containsKey(EmbeddedEngine.OFFSET_FLUSH_INTERVAL_MS_PROP)) {
+            props.setProperty(EmbeddedEngine.OFFSET_FLUSH_INTERVAL_MS_PROP, "60000");
+        }
 
-        props.setProperty(EmbeddedEngine.OFFSET_FLUSH_INTERVAL_MS_PROP, "60000"); // TODO do we need this to be smaler?
-
-        props.setProperty("topic.prefix", prefix); // TODO which constant?
+        props.setProperty("topic.prefix", prefix); // TODO what effect does this actually have?
         props.setProperty(HistorizedRelationalDatabaseConnectorConfig.SCHEMA_HISTORY.name(), KafkaSchemaHistory.class.getName());
-
-        // TODO doesnt it need topic names?
-
 
         engine = DebeziumEngine.create(Json.class)
                 .using(props)
-                // TODO add other stuff here...
+                .using((DebeziumEngine.CompletionCallback) this)
+                .using((DebeziumEngine.ConnectorCallback) this)
                 .notifying(record -> {
-                    log.info("got a record: {}", record);
-                    changeHandler.accept(record);
+                    log.debug("TWRD_CDCDEB_01 receiving change {}", record); // TODO is destination or headers ever relevant? or only when you use debezium transformers?
+                    if(mapper == null) {
+                        mapper = new DefaultDebeziumRawMapper(om);
+                    }
+                    changeHandler.accept(mapper.map(record.key(), record.value()));
                 })
-                .using(this)
                 .build();
     }
 
@@ -64,26 +65,48 @@ public class DebeziumEngineWrapper implements Runnable, AutoCloseable, DebeziumE
         engine.run();
     }
 
-    public void close() throws IOException {
+    @Override
+    public void close() throws IOException, InterruptedException {
         engine.close();
+
+        // and now it would be nice to await actual completion, but debezium doesn't offer that at the moment
+        // https://issues.redhat.com/browse/DBZ-6629
+        // DebeziumEngine e = engine;
+        // ((EmbeddedEngine)e).await(10, TimeUnit.SECONDS);
     }
 
+    @Override
     public void connectorStarted() {
+        log.info("TWRI_CDCDEB_02 connector started");
     }
 
+    @Override
     public void connectorStopped() {
+        log.info("TWRI_CDCDEB_12 connector stopped");
         startupLatch = new CountDownLatch(1);
     }
 
+    @Override
     public void taskStarted() {
+        log.info("TWRI_CDCDEB_03 task started");
         startupLatch.countDown();
     }
 
+    @Override
     public void taskStopped() {
+        log.info("TWRI_CDCDEB_11 task stopped");
     }
 
     public void awaitUntilRunning(long timeout, TimeUnit unit) throws InterruptedException {
         startupLatch.await(timeout, unit);
     }
 
+    @Override
+    public void handle(boolean success, String message, Throwable error) {
+        if(success) {
+            log.info("TWRI_CDCDEB_14 connector completed successfully. {}. exception: {}", message, error);
+        } else {
+            log.warn("TWRW_CDCDEB_15 connector completed with a failure. {}. exception: {}", message, error);
+        }
+    }
 }
