@@ -13,6 +13,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Properties;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
@@ -60,12 +61,13 @@ public class DebeziumEngineWrapperIT extends AbstractContainerBaseTest {
         List<String> collectedRecords = new ArrayList<>();
         CountDownLatch latch = new CountDownLatch(1);
         ObjectMapper om = SimpleJacksonConfig.getOM();
+        ExecutorService es = Executors.newFixedThreadPool(1);
         try(DebeziumEngineWrapper wrapper = new DebeziumEngineWrapper(DatabaseType.Mysql, "test", props, om, changeEvent -> {
             System.out.println("HERE: " + changeEvent);
             collectedRecords.add(new String(changeEvent.value()));
             latch.countDown();
         })) {
-            Executors.newFixedThreadPool(1).execute(wrapper);
+            es.execute(wrapper);
 
             wrapper.awaitUntilRunning(60, TimeUnit.SECONDS);
             System.out.println("CREATING TASKS TABLE");
@@ -81,6 +83,8 @@ public class DebeziumEngineWrapperIT extends AbstractContainerBaseTest {
 
             assertEquals(1, collectedRecords.size());
             fail("TODO more assertions");
+        } finally {
+            es.shutdown();
         }
     }
 }

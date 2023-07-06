@@ -13,6 +13,7 @@ import rocks.twr.api.DebeziumRawMapper;
 import rocks.twr.api.out.DatabaseType;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.Properties;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -56,7 +57,8 @@ public class DebeziumEngineWrapper implements Runnable, AutoCloseable, DebeziumE
                     if(mapper == null) {
                         mapper = new DefaultDebeziumRawMapper(om);
                     }
-                    changeHandler.accept(mapper.map(record.key(), record.value()));
+//TODO continue here                    changeHandler.accept(mapper.map(record.key(), record.value()));
+                    changeHandler.accept(new DebeziumRawMapper.MappedEvent("asdf", null, "TODO".getBytes(StandardCharsets.UTF_8), null));
                 })
                 .build();
     }
